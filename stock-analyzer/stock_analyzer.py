@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""
+Stock Analyzer - Multi-agent stock analysis using TradingAgents logic
+通过浏览器访问同花顺获取数据，无需API Key
+"""
+
+import json
+import re
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+# 股票代码映射（常见股票）
+STOCK_MAP = {
+    "茅台": "600519",
+    "贵州茅台": "600519",
+    "平安": "000001",
+    "中国平安": "000001",
+    "比亚迪": "002594",
+    "宁德时代": "300750",
+    "腾讯": "00700",
+    "阿里巴巴": "09988",
+    "美团": "03690",
+    "五粮液": "000858",
+    "招商银行": "600036",
+    "中信证券": "600030",
+}
+
+def resolve_stock_code(query: str) -> str:
+    """解析股票代码"""
+    query = query.strip()
+    
+    # 直接是6位代码
+    if re.match(r'^\d{6}$', query):
+        return query
+    
+    # 从映射表中查找
+    if query in STOCK_MAP:
+        return STOCK_MAP[query]
+    
+    # 尝试匹配名称
+    for name, code in STOCK_MAP.items():
+        if name in query or query in name:
+            return code
+    
+    return query  # 返回原值，可能已经是代码格式
+
+def get_ths_urls(stock_code: str) -> Dict[str, str]:
+    """获取同花顺各页面URL"""
+    base = f"https://basic.10jqka.com.cn/{stock_code}"
+    return {
+        "overview": f"{base}/",
+        "capital": f"{base}/captial.html",
+        "finance": f"{base}/finance.html",
+        "report": f"{base}/report.html",
+    }
+
+def create_analysis_prompt(agent_type: str, data: Dict) -> str:
+    """创建不同角色的分析提示词"""
+    
+    prompts = {
+        "fundamental": f"""你是一位专业的基本面分析师。请基于以下股票数据进行基本面分析：
+
+股票代码: {data.get('code', 'N/A')}
+股票名称: {data.get('name', 'N/A')}
+
+【财务数据】
+- 市盈率(PE): {data.get('pe', 'N/A')}
+- 市净率(PB): {data.get('pb', 'N/A')}
+- 总市值: {data.get('market_cap', 'N/A')}
+- 净资产收益率(ROE): {data.get('roe', 'N/A')}
+- 营业收入同比: {data.get('revenue_growth', 'N/A')}
+- 净利润同比: {data.get('profit_growth', 'N/A')}
+- 资产负债率: {data.get('debt_ratio', 'N/A')}
+
+请从以下维度进行分析：
+1. 估值水平（PE/PB 是否合理）
+2. 盈利能力（ROE 质量）
+3. 成长性（营收/利润增长）
+4. 财务健康度（负债水平）
+
+输出格式：
+【评分】: x/10
+【核心观点】: （50字以内）
+【关键风险】: （列举1-2个风险点）
+""",
+        
+        "technical": f"""你是一位专业的技术分析专家。请基于以下技术数据进行趋势分析：
+
+股票代码: {data.get('code', 'N/A')}
+股票名称: {data.get('name', 'N/A')}
+
+【价格数据】
+- 当前价格: {data.get('price', 'N/A')}
+- 今日涨跌: {data.get('change', 'N/A')}
+- 今日最高: {data.get('high', 'N/A')}
+- 今日最低: {data.get('low', 'N/A')}
+- 成交量: {data.get('volume', 'N/A')}
+
+【技术指标】
+- MA5: {data.get('ma5', 'N/A')}
+- MA10: {data.get('ma10', 'N/A')}
+- MA20: {data.get('ma20', 'N/A')}
+- MACD: {data.get('macd', 'N/A')}
+- KDJ: {data.get('kdj', 'N/A')}
+
+请分析：
+1. 趋势方向（多头/空头/震荡）
+2. 关键支撑位和阻力位
+3. 技术指标信号
+4. 成交量配合情况
+
+输出格式：
+【评分】: x/10
+【技术形态】: （趋势判断）
+【关键价位】: 支撑: ¥x.xx  阻力: ¥x.xx
+【操作建议】: （买入/持有/观望/卖出）
+""",
+        
+        "sentiment": f"""你是一位市场情绪分析专家。请基于以下资金数据进行情绪分析：
+
+股票代码: {data.get('code', 'N/A')}
+股票名称: {data.get('name', 'N/A')}
+
+【资金流向】
+- 主力净流入: {data.get('main_fund_flow', 'N/A')}
+- 散户净流入: {data.get('retail_fund_flow', 'N/A')}
+- 换手率: {data.get('turnover', 'N/A')}
+- 量比: {data.get('volume_ratio', 'N/A')}
+
+请分析：
+1. 主力资金态度（流入/流出/观望）
+2. 市场情绪热度
+3. 筹码交换情况
+4. 短期投机情绪
+
+输出格式：
+【评分】: x/10
+【资金态度】: （主力意图判断）
+【情绪热度】: （高/中/低）
+【风险提示】: （情绪相关风险）
+""",
+        
+        "debate": f"""你是一位多空辩论主持人。请基于以下各分析师的观点，组织一场多空辩论：
+
+【基本面分析师观点】
+{data.get('fundamental_view', 'N/A')}
+评分: {data.get('fundamental_score', 'N/A')}/10
+
+【技术面分析师观点】
+{data.get('technical_view', 'N/A')}
+评分: {data.get('technical_score', 'N/A')}/10
+
+【情绪面分析师观点】
+{data.get('sentiment_view', 'N/A')}
+评分: {data.get('sentiment_score', 'N/A')}/10
+
+请分别列出：
+【多头观点】: 支持买入的理由（3-5条）
+【空头观点】: 谨慎/看空的理由（3-5条）
+【综合平衡】: 哪方观点更有说服力？
+""",
+        
+        "risk": f"""你是一位风险管理经理。请基于以下分析结果进行风险评估：
+
+【各维度评分】
+- 基本面评分: {data.get('fundamental_score', 'N/A')}/10
+- 技术面评分: {data.get('technical_score', 'N/A')}/10
+- 情绪面评分: {data.get('sentiment_score', 'N/A')}/10
+- 综合平均分: {data.get('avg_score', 'N/A')}/10
+
+【当前价格信息】
+- 当前价: {data.get('price', 'N/A')}
+- 支撑位: {data.get('support', 'N/A')}
+- 阻力位: {data.get('resistance', 'N/A')}
+
+请给出：
+【风险等级】: 高/中/低
+【最大回撤风险】: 预计最大可能下跌幅度
+【建议仓位】: 轻仓(10-20%)/中等(30-50%)/重仓(60%+)/空仓
+【止损位建议】: 具体价格
+【风控提示】: 风险警示
+"""
+    }
+    
+    return prompts.get(agent_type, "请分析这只股票")
+
+def generate_final_report(data: Dict, analyses: Dict) -> str:
+    """生成最终分析报告"""
+    
+    report = f"""# 📈 {data.get('name', '股票')} ({data.get('code', '')}) 分析报告
+
+**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+---
+
+## 📊 数据概览
+
+| 指标 | 数值 |
+|------|------|
+| **当前价格** | ¥{data.get('price', 'N/A')} |
+| **今日涨跌** | {data.get('change', 'N/A')} |
+| **市值** | {data.get('market_cap', 'N/A')} |
+| **换手率** | {data.get('turnover', 'N/A')} |
+| **PE/PB** | {data.get('pe', 'N/A')} / {data.get('pb', 'N/A')} |
+
+---
+
+## 🤖 智能体分析
+
+### 📈 基本面分析
+{analyses.get('fundamental', '待分析')}
+
+### 📉 技术面分析
+{analyses.get('technical', '待分析')}
+
+### 💰 情绪面分析
+{analyses.get('sentiment', '待分析')}
+
+---
+
+## ⚔️ 多空辩论
+
+{analyses.get('debate', '待分析')}
+
+---
+
+## 🎯 综合建议
+
+{analyses.get('risk', '待分析')}
+
+---
+
+## ⚠️ 重要声明
+
+- 本分析仅供学习研究使用，不构成任何投资建议
+- 股市有风险，投资需谨慎
+- 分析基于公开数据和AI推理，存在不确定性
+- 请结合自身风险承受能力做出决策
+
+---
+
+*Generated by Stock Analyzer Skill*
+"""
+    return report
+
+# 导出主要函数
+__all__ = [
+    'resolve_stock_code',
+    'get_ths_urls', 
+    'create_analysis_prompt',
+    'generate_final_report',
+    'STOCK_MAP'
+]
